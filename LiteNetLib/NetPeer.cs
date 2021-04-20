@@ -721,28 +721,47 @@ namespace LiteNetLib
                 //just simple packet
                 NetPacket resultingPacket = _packetPool.GetPacket(incomingFragments.TotalSize);
 
-                int firstFragmentSize = fragments[0].Size - NetConstants.FragmentedHeaderTotalSize;
+                int pos = 0;
                 for (int i = 0; i < incomingFragments.ReceivedCount; i++)
                 {
                     var fragment = fragments[i];
+                    int writtenSize = fragment.Size - NetConstants.FragmentedHeaderTotalSize;
+
+                    if (pos+writtenSize > resultingPacket.RawData.Length)
+                    {
+                        _holdedFragments.Remove(packetFragId);
+                        NetDebug.WriteError("Fragment error pos: {0} >= resultPacketSize: {1} , totalSize: {2}", 
+                            pos + writtenSize, 
+                            resultingPacket.RawData.Length,
+                            incomingFragments.TotalSize);
+                        return;
+                    }
+                    if (fragment.Size > fragment.RawData.Length)
+                    {
+                        _holdedFragments.Remove(packetFragId);
+                        NetDebug.WriteError("Fragment error size: {0} > fragment.RawData.Length: {1}", fragment.Size, fragment.RawData.Length);
+                        return;
+                    }
+
                     //Create resulting big packet
                     Buffer.BlockCopy(
                         fragment.RawData,
                         NetConstants.FragmentedHeaderTotalSize,
                         resultingPacket.RawData,
-                        firstFragmentSize * i,
-                        fragment.Size - NetConstants.FragmentedHeaderTotalSize);
+                        pos,
+                        writtenSize);
+                    pos += writtenSize;
 
                     //Free memory
                     _packetPool.Recycle(fragment);
+                    fragments[i] = null;
                 }
-                Array.Clear(fragments, 0, incomingFragments.ReceivedCount);
-
-                //Send to process
-                NetManager.CreateReceiveEvent(resultingPacket, method, 0, this);
 
                 //Clear memory
                 _holdedFragments.Remove(packetFragId);
+
+                //Send to process
+                NetManager.CreateReceiveEvent(resultingPacket, method, 0, this);
             }
             else //Just simple packet
             {
@@ -910,22 +929,19 @@ namespace LiteNetLib
                         ushort size = BitConverter.ToUInt16(packet.RawData, pos);
                         pos += 2;
                         if (packet.RawData.Length - pos < size)
-                        {
-                            _packetPool.Recycle(packet);
-                            return;
-                        }
+                            break;
+
                         NetPacket mergedPacket = _packetPool.GetPacket(size);
                         Buffer.BlockCopy(packet.RawData, pos, mergedPacket.RawData, 0, size);
                         mergedPacket.Size = size;
 
-                        if (!mergedPacket.Verify() || packet.RawData.Length < pos + size)
-                        {
-                            _packetPool.Recycle(packet);
+                        if (!mergedPacket.Verify())
                             break;
-                        }
+
                         pos += size;
                         ProcessPacket(mergedPacket);
                     }
+                    _packetPool.Recycle(packet);
                     break;
                 //If we get ping, send pong
                 case PacketProperty.Ping:
